@@ -1,0 +1,21 @@
+# Secrets — NEVER commit
+.env
+.streamlit/secrets.toml
+
+# Vector store (large binary files)
+vector_store/
+
+# Uploaded files temp
+studyrag_uploads_*/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+env/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
