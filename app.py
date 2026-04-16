@@ -20,6 +20,7 @@ from src.ingestion.ingestion import (
     ingest_preloaded_pdfs,
     ingest_uploaded_files,
     get_collection_stats,
+    is_cloud_environment,
 )
 from src.agents.crew import run_analytical_query, detect_query_type
 
@@ -230,6 +231,16 @@ def ensure_tmp_dir():
 # STARTUP
 # ─────────────────────────────────────────────────────────────────────────────
 if not st.session_state.startup_done:
+    # On Streamlit Cloud: auto-index preloaded PDFs since disk is ephemeral
+    if is_cloud_environment() and settings.GROQ_API_KEY:
+        with st.spinner("⚙️ First-time setup: indexing PDFs, please wait…"):
+            try:
+                result = ingest_preloaded_pdfs()
+                n = len(result["indexed"])
+                if n:
+                    logger.info(f"Cloud startup: indexed {n} PDFs")
+            except Exception as e:
+                logger.error(f"Cloud auto-index error: {e}")
     refresh_stats()
     st.session_state.startup_done = True
 
