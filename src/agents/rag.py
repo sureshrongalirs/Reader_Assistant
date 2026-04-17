@@ -5,6 +5,7 @@ Pure RAG retrieval layer — no CrewAI here.
 Used by the agent layer and can be tested independently.
 """
 
+import os
 import logging
 from dataclasses import dataclass, field
 
@@ -25,21 +26,48 @@ class RAGResult:
     has_answer: bool = True
 
 
+def _get_groq_api_key() -> str:
+    """
+    Always read the Groq API key fresh at call time.
+
+    Priority:
+      1. settings object (may have been updated by app.py after secrets load)
+      2. environment variable (set by app.py from st.secrets)
+    This avoids the stale-singleton problem where the settings object
+    was created at import time before Streamlit secrets were injected.
+    """
+    key = settings.GROQ_API_KEY or os.environ.get("GROQ_API_KEY", "")
+    if not key:
+        raise ValueError(
+            "GROQ_API_KEY is not set. "
+            "Add it to your .env file (local) or Streamlit secrets (cloud)."
+        )
+    return key
+
+
 def rag_query(query: str, top_k: int = 5) -> RAGResult:
     """
     Retrieve top_k relevant chunks and generate an answer.
     top_k=5 gives better cross-document coverage than default 3.
     """
+    api_key = _get_groq_api_key()
     embed_model = get_embed_model()
+
+    # Always configure LlamaIndex settings fresh — never rely on a cached LLM
     Settings.embed_model = embed_model
     Settings.llm = Groq(
         model=settings.MODEL_NAME,
         temperature=settings.MODEL_TEMPERATURE,
-        api_key=settings.GROQ_API_KEY,
+        api_key=api_key,                  # ← explicit key, not relying on env
     )
 
     index = get_or_create_index()
-    query_engine = index.as_query_engine(similarity_top_k=top_k)
+
+    # Build query engine with the explicit LLM so it never falls back to OpenAI
+    query_engine = index.as_query_engine(
+        similarity_top_k=top_k,
+        llm=Settings.llm,                 # ← pass LLM explicitly to engine too
+    )
     response = query_engine.query(query)
 
     raw_answer = response.response or ""
