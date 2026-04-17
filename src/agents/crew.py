@@ -8,6 +8,7 @@ CrewAI agents and tasks for different analytical query types:
   - extract     : numbers, tables, structured data
 """
 
+import os
 import logging
 from typing import Literal
 from pydantic import BaseModel
@@ -35,10 +36,33 @@ class AnalyticalAnswer(BaseModel):
 
 # ── LLM factory ───────────────────────────────────────────────────────────────
 
+def _get_groq_api_key() -> str:
+    """
+    Always read the Groq API key fresh — never from the stale module-level
+    singleton that was created before Streamlit secrets were loaded.
+    """
+    key = settings.GROQ_API_KEY or os.environ.get("GROQ_API_KEY", "")
+    if not key:
+        raise ValueError(
+            "GROQ_API_KEY is not set. "
+            "Add it to .env (local) or Streamlit Secrets (cloud)."
+        )
+    return key
+
+
 def _get_llm() -> LLM:
+    """
+    Build the CrewAI LLM with the API key read fresh at call time.
+    CrewAI's LLM wrapper needs GROQ_API_KEY in the environment OR
+    passed as api_key — we do both to be safe.
+    """
+    api_key = _get_groq_api_key()
+    # Keep env var in sync so CrewAI's internal OpenAI-compat client finds it
+    os.environ["GROQ_API_KEY"] = api_key
     return LLM(
         model=f"groq/{settings.MODEL_NAME}",
         temperature=settings.MODEL_TEMPERATURE,
+        api_key=api_key,          # explicit — no relying on env lookup inside LLM
     )
 
 
@@ -102,10 +126,10 @@ def _build_task(agent: Agent, query: str, rag_result: RAGResult,
                 query_type: str, chat_history: str) -> Task:
 
     type_instructions = {
-        "qa": "Answer the question directly and precisely. Cite the source documents.",
+        "qa":        "Answer the question directly and precisely. Cite the source documents.",
         "summarise": "Produce a structured summary with key points as bullet points or sections.",
-        "compare": "Create a structured comparison. Use a table or side-by-side format where helpful.",
-        "extract": "Extract all relevant numbers, statistics, dates, or structured data. Present in a clean list or table.",
+        "compare":   "Create a structured comparison. Use a table or side-by-side format where helpful.",
+        "extract":   "Extract all relevant numbers, statistics, dates, or structured data. Present in a clean list or table.",
     }
 
     instruction = type_instructions.get(query_type, type_instructions["qa"])
@@ -161,21 +185,12 @@ def run_analytical_query(
 ) -> dict:
     """
     Full pipeline: RAG retrieval → agent selection → structured answer.
-
-    Args:
-        query: User's natural language question.
-        chat_history: List of {"role": ..., "content": ...} dicts.
-        query_type: Override auto-detection if desired.
-
-    Returns:
-        dict matching AnalyticalAnswer schema.
     """
-    # Step 1: Auto-detect query type
     if query_type is None:
         query_type = detect_query_type(query)
     logger.info(f"Query type: {query_type}")
 
-    # Step 2: RAG — more chunks for compare/extract
+    # RAG — more chunks for compare/extract
     top_k = 7 if query_type in ("compare", "extract") else 5
     rag_result = rag_query(query, top_k=top_k)
 
@@ -189,23 +204,20 @@ def run_analytical_query(
             "confidence": "low",
         }
 
-    # Step 3: Select agent
     llm = _get_llm()
     agent_map = {
-        "qa": _qa_agent,
+        "qa":        _qa_agent,
         "summarise": _summarise_agent,
-        "compare": _compare_agent,
-        "extract": _extract_agent,
+        "compare":   _compare_agent,
+        "extract":   _extract_agent,
     }
     agent = agent_map[query_type](llm)
 
-    # Step 4: Format chat history
     history_str = (
         "\n".join(f"{m['role'].title()}: {m['content']}" for m in chat_history[-6:])
         if chat_history else "none"
     )
 
-    # Step 5: Run crew
     task = _build_task(agent, query, rag_result, query_type, history_str)
     crew = Crew(agents=[agent], tasks=[task], verbose=False)
 
@@ -213,6 +225,7 @@ def run_analytical_query(
         result = crew.kickoff().to_dict()
     except Exception as e:
         logger.error(f"Crew error: {e}")
+        # Fallback: return the raw RAG answer without CrewAI structuring
         result = {
             "answer": rag_result.raw_answer,
             "sources": rag_result.source_files,
