@@ -20,7 +20,6 @@ from src.ingestion.ingestion import (
     ingest_preloaded_pdfs,
     ingest_uploaded_files,
     get_collection_stats,
-    is_cloud_environment,
 )
 from src.agents.crew import run_analytical_query, detect_query_type
 
@@ -31,12 +30,29 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ── Pull API key from Streamlit secrets if available (cloud deploy) ───────────
-if not settings.GROQ_API_KEY:
-    try:
-        settings.GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
-        os.environ["GROQ_API_KEY"] = settings.GROQ_API_KEY
-    except Exception:
-        pass
+# Must happen BEFORE any module that reads settings.GROQ_API_KEY or os.environ
+def _load_groq_key():
+    """Load GROQ_API_KEY from Streamlit secrets or .env and sync everywhere."""
+    key = ""
+    # 1. Already in settings (loaded from .env locally)
+    if settings.GROQ_API_KEY:
+        key = settings.GROQ_API_KEY
+    # 2. Try Streamlit secrets (cloud deploy)
+    if not key:
+        try:
+            key = st.secrets["GROQ_API_KEY"]
+        except Exception:
+            pass
+    # 3. Try env var directly
+    if not key:
+        key = os.environ.get("GROQ_API_KEY", "")
+    # Sync to both settings singleton and os.environ so all modules see it
+    if key:
+        settings.GROQ_API_KEY = key
+        os.environ["GROQ_API_KEY"] = key
+    return key
+
+_load_groq_key()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -231,16 +247,6 @@ def ensure_tmp_dir():
 # STARTUP
 # ─────────────────────────────────────────────────────────────────────────────
 if not st.session_state.startup_done:
-    # On Streamlit Cloud: auto-index preloaded PDFs since disk is ephemeral
-    if is_cloud_environment() and settings.GROQ_API_KEY:
-        with st.spinner("⚙️ First-time setup: indexing PDFs, please wait…"):
-            try:
-                result = ingest_preloaded_pdfs()
-                n = len(result["indexed"])
-                if n:
-                    logger.info(f"Cloud startup: indexed {n} PDFs")
-            except Exception as e:
-                logger.error(f"Cloud auto-index error: {e}")
     refresh_stats()
     st.session_state.startup_done = True
 
